@@ -1,6 +1,7 @@
 //  For licensing see accompanying LICENSE.md file.
 //  Copyright © 2024 Argmax, Inc. All rights reserved.
 
+import AVFoundation
 import Foundation
 
 @available(macOS 13, iOS 16, watchOS 10, visionOS 1, *)
@@ -72,14 +73,14 @@ public actor AudioStreamTranscriber {
         self.stateChangeCallback = stateChangeCallback
     }
 
-    public func startStreamTranscription() async throws {
+    public func startStreamTranscription(inputNode: AVAudioInputNode? = nil) async throws {
         guard !state.isRecording else { return }
         guard await AudioProcessor.requestRecordPermission() else {
             Logging.error("Microphone access was not granted.")
             return
         }
         state.isRecording = true
-        try audioProcessor.startRecordingLive { [weak self] _ in
+        try audioProcessor.startRecordingLive(inputNode: inputNode) { [weak self] _ in
             Task { [weak self] in
                 await self?.onAudioBufferCallback()
             }
@@ -88,9 +89,9 @@ public actor AudioStreamTranscriber {
         Logging.info("Realtime transcription has started")
     }
 
-    public func stopStreamTranscription() {
+    public func stopStreamTranscription(inputNode: AVAudioInputNode? = nil) {
         state.isRecording = false
-        audioProcessor.stopRecording()
+        audioProcessor.stopRecording(inputNode: inputNode)
         Logging.info("Realtime transcription has ended")
     }
 

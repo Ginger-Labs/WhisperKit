@@ -60,16 +60,16 @@ public protocol AudioProcessing {
     var relativeEnergyWindow: Int { get set }
 
     /// Starts recording audio from the specified input device, resetting the previous state
-    func startRecordingLive(inputDeviceID: DeviceID?, callback: (([Float]) -> Void)?) throws
+    func startRecordingLive(inputDeviceID: DeviceID?, inputNode: AVAudioInputNode?, callback: (([Float]) -> Void)?) throws
 
     /// Pause recording
     func pauseRecording()
 
     /// Stops recording and cleans up resources
-    func stopRecording()
+    func stopRecording(inputNode: AVAudioInputNode?)
 
     /// Resume recording audio from the specified input device, appending to continuous `audioArray` after pause
-    func resumeRecordingLive(inputDeviceID: DeviceID?, callback: (([Float]) -> Void)?) throws
+    func resumeRecordingLive(inputDeviceID: DeviceID?, inputNode: AVAudioInputNode?, callback: (([Float]) -> Void)?) throws
 }
 
 /// Overrideable default methods for AudioProcessing
@@ -84,12 +84,12 @@ public extension AudioProcessing {
         }.value
     }
 
-    func startRecordingLive(inputDeviceID: DeviceID? = nil, callback: (([Float]) -> Void)?) throws {
-        try startRecordingLive(inputDeviceID: inputDeviceID, callback: callback)
+    func startRecordingLive(inputDeviceID: DeviceID? = nil, inputNode: AVAudioInputNode? = nil, callback: (([Float]) -> Void)?) throws {
+        try startRecordingLive(inputDeviceID: inputDeviceID, inputNode: inputNode, callback: callback)
     }
 
-    func resumeRecordingLive(inputDeviceID: DeviceID? = nil, callback: (([Float]) -> Void)?) throws {
-        try resumeRecordingLive(inputDeviceID: inputDeviceID, callback: callback)
+    func resumeRecordingLive(inputDeviceID: DeviceID? = nil, inputNode: AVAudioInputNode? = nil, callback: (([Float]) -> Void)?) throws {
+        try resumeRecordingLive(inputDeviceID: inputDeviceID, inputNode: inputNode, callback: callback)
     }
 
     static func padOrTrimAudio(fromArray audioArray: [Float], startAt startIndex: Int = 0, toLength frameLength: Int = 480_000, saveSegment: Bool = false) -> MLMultiArray? {
@@ -761,7 +761,17 @@ public extension AudioProcessor {
         }
         #endif
 
-        let hardwareSampleRate = audioEngine.inputNode.inputFormat(forBus: 0).sampleRate
+        try installTap(on: inputNode)
+
+        audioEngine.prepare()
+        try audioEngine.start()
+
+        return audioEngine
+    }
+    
+    func installTap(on inputNode: AVAudioInputNode) throws {
+        let hardwareSampleRate = inputNode.inputFormat(forBus: 0).sampleRate
+        
         let inputFormat = inputNode.outputFormat(forBus: 0)
 
         guard let nodeFormat = AVAudioFormat(commonFormat: inputFormat.commonFormat, sampleRate: hardwareSampleRate, channels: inputFormat.channelCount, interleaved: inputFormat.isInterleaved) else {
@@ -776,7 +786,7 @@ public extension AudioProcessor {
         guard let converter = AVAudioConverter(from: nodeFormat, to: desiredFormat) else {
             throw WhisperError.audioProcessingFailed("Failed to create audio converter")
         }
-
+        
         let bufferSize = AVAudioFrameCount(minBufferLength) // 100ms - 400ms supported
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: nodeFormat) { [weak self] (buffer: AVAudioPCMBuffer, _: AVAudioTime) in
             guard let self = self else { return }
@@ -793,11 +803,6 @@ public extension AudioProcessor {
             let newBufferArray = Self.convertBufferToArray(buffer: buffer)
             self.processBuffer(newBufferArray)
         }
-
-        audioEngine.prepare()
-        try audioEngine.start()
-
-        return audioEngine
     }
 
     func purgeAudioSamples(keepingLast keep: Int) {
@@ -806,29 +811,38 @@ public extension AudioProcessor {
         }
     }
 
-    func startRecordingLive(inputDeviceID: DeviceID? = nil, callback: (([Float]) -> Void)? = nil) throws {
+    func startRecordingLive(inputDeviceID: DeviceID? = nil, inputNode: AVAudioInputNode? = nil, callback: (([Float]) -> Void)? = nil) throws {
         audioSamples = []
         audioEnergy = []
+        
+        if let inputNode {
+            try installTap(on: inputNode)
+        } else {
 
-        try? setupAudioSessionForDevice()
-
-        audioEngine = try setupEngine(inputDeviceID: inputDeviceID)
-
+            try? setupAudioSessionForDevice()
+            
+            audioEngine = try setupEngine(inputDeviceID: inputDeviceID)
+            
+            lastInputDevice = inputDeviceID
+        }
+        
         // Set the callback
         audioBufferCallback = callback
-
-        lastInputDevice = inputDeviceID
     }
 
-    func resumeRecordingLive(inputDeviceID: DeviceID? = nil, callback: (([Float]) -> Void)? = nil) throws {
-        try? setupAudioSessionForDevice()
-
-        if inputDeviceID == lastInputDevice {
-            try audioEngine?.start()
+    func resumeRecordingLive(inputDeviceID: DeviceID? = nil, inputNode: AVAudioInputNode? = nil, callback: (([Float]) -> Void)? = nil) throws {
+        if let inputNode {
+            // ???
         } else {
-            audioEngine = try setupEngine(inputDeviceID: inputDeviceID)
+            try? setupAudioSessionForDevice()
+            
+            if inputDeviceID == lastInputDevice {
+                try audioEngine?.start()
+            } else {
+                audioEngine = try setupEngine(inputDeviceID: inputDeviceID)
+            }
         }
-
+        
         // Set the callback only if the provided callback is not nil
         if let callback = callback {
             audioBufferCallback = callback
@@ -839,14 +853,18 @@ public extension AudioProcessor {
         audioEngine?.pause()
     }
 
-    func stopRecording() {
-        // Remove the tap on any attached node
-        audioEngine?.attachedNodes.forEach { node in
-            node.removeTap(onBus: 0)
+    func stopRecording(inputNode: AVAudioInputNode? = nil) {
+        if let inputNode {
+            inputNode.removeTap(onBus: 0)
+        } else {
+            // Remove the tap on any attached node
+            audioEngine?.attachedNodes.forEach { node in
+                node.removeTap(onBus: 0)
+            }
+            
+            // Stop the audio engine
+            audioEngine?.stop()
+            audioEngine = nil
         }
-
-        // Stop the audio engine
-        audioEngine?.stop()
-        audioEngine = nil
     }
 }
